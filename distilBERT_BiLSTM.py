@@ -16,11 +16,25 @@ MAX_SEQUENCE_LENGTH = 128
 MAX_TOKEN_LENGTH = 128
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 TEST_SIZE = 0.2
-RANDOM_STATE = 51
-DISTILBERT_HIDDEN_DIM = 768
 BATCH_SIZE = 8
 
-PATH_TRAIN_1 = 'data/train_subtask1.csv'
+''' 
+Param to fine tune
+'''
+DISTILBERT_HIDDEN_DIM = 768
+RANDOM_STATE = 51
+# Decreasae to avoid local-min or local max
+LEARNING_RATE = 1e-5
+# increase for deeper LSTM
+NUM_LAYERS = 2
+# Increase this to reduce overlifting
+NN_DROP_OUT = 0.4
+# EPOCH that could be changed in CLI
+
+# change this upsize (up)
+LSTM_HIDDEN_DIM = 512
+
+PATH_TRAIN_1 = 'data/train_split_subtask1.csv'
 PATH_TRAIN_2A = 'data/train_subtask2a.csv'
 PATH_TRAIN_2B = 'data/train_subtask2b.csv'
 
@@ -93,7 +107,7 @@ class DatasetSubtask1(Dataset):
         if len(embeddings_list) > 0:
             return torch.cat(embeddings_list, dim=0)
         else:
-            return torch.empty(0, 768)
+            return torch.empty(0, DISTILBERT_HIDDEN_DIM)
 
 
 class DatasetSubtask2A(Dataset):
@@ -157,7 +171,7 @@ class DatasetSubtask2A(Dataset):
             output = self.embedder(input_ids=input_ids, attention_mask=mask)
             embeddings_list.append(output.last_hidden_state[:, 0, :].cpu())
         if len(embeddings_list) > 0: return torch.cat(embeddings_list, dim=0)
-        else: return torch.empty(0, 768)
+        else: return torch.empty(0, DISTILBERT_HIDDEN_DIM)
 
 
 class DatasetSubtask2B(Dataset):
@@ -203,7 +217,7 @@ class DatasetSubtask2B(Dataset):
             encoded = self.tokenizer(batch, padding='max_length', truncation=True, max_length=MAX_TOKEN_LENGTH, return_tensors='pt')
             embeddings_list.append(self.embedder(encoded['input_ids'].to(DEVICE), encoded['attention_mask'].to(DEVICE)).last_hidden_state[:, 0, :].cpu())
         if len(embeddings_list) > 0: return torch.cat(embeddings_list, dim=0)
-        else: return torch.empty(0, 768)
+        else: return torch.empty(0, DISTILBERT_HIDDEN_DIM)
 
 
 class ModelSubtask1(nn.Module):
@@ -212,11 +226,11 @@ class ModelSubtask1(nn.Module):
         self.lstm = nn.LSTM(
             input_size=DISTILBERT_HIDDEN_DIM,
             hidden_size=lstm_hidden_dim,
-            num_layers=num_layers,
+            num_layers=NUM_LAYERS,
             bidirectional=True, 
             batch_first=True
         )
-        self.dropout = nn.Dropout(0.3)
+        self.dropout = nn.Dropout(NN_DROP_OUT)
         self.regressor = nn.Linear(lstm_hidden_dim * 2, 1)
 
     def forward(self, x):
@@ -250,7 +264,7 @@ class ModelSubtask2B(nn.Module):
             bidirectional=True, 
             batch_first=True
         )
-        self.dropout = nn.Dropout(0.3)
+        self.dropout = nn.Dropout(NN_DROP_OUT)
         self.regressor = nn.Linear(lstm_hidden_dim * 2, 1)
 
     def forward(self, x):
@@ -311,10 +325,10 @@ def eval_epoch(model, loader, criterion, mode='1'):
             total_loss += loss.item()
 
     if len(all_targets) > 0:
-        mse = np.mean((np.array(all_targets) - np.array(all_preds))**2)
+        mae = np.mean(np.abs(np.array(all_targets) - np.array(all_preds)))
     else:
-        mse = 0.0
-    return mse, total_loss / len(loader)
+        mae = 0.0
+    return mae, total_loss / len(loader)
 
 
 def main():
@@ -350,13 +364,13 @@ def main():
     train_loader = DataLoader(Subset(dataset, train_idx), batch_size=BATCH_SIZE, shuffle=True)
     val_loader = DataLoader(Subset(dataset, val_idx), batch_size=BATCH_SIZE, shuffle=False)
 
-    optimizer = AdamW(model.parameters(), lr=1e-4) 
-    criterion = nn.MSELoss()
+    optimizer = AdamW(model.parameters(), lr=LEARNING_RATE)
+    criterion = nn.L1Loss()
 
     for epoch in range(args.epochs):
         train_loss = train_epoch(model, train_loader, optimizer, criterion, mode=args.task)
-        val_mse, val_loss = eval_epoch(model, val_loader, criterion, mode=args.task)
-        print(f"Epoch {epoch+1}: Train Loss {train_loss:.4f} | Val Loss {val_loss:.4f} | Val MSE {val_mse:.4f} | Val RMSE {np.sqrt(val_mse):.4f}")
+        val_mae, val_loss = eval_epoch(model, val_loader, criterion, mode=args.task)
+        print(f"Epoch {epoch+1}: Train Loss {train_loss:.4f} | Val Loss {val_loss:.4f} | Val MAE {val_mae:.4f}")
 
     save_path = f"models/model_task{args.task}_{args.target}.pt"
     Path(save_path).parent.mkdir(parents=True, exist_ok=True)
