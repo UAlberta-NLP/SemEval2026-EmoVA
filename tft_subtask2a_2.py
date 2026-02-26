@@ -9,7 +9,7 @@ from pytorch_forecasting.data import MultiNormalizer, GroupNormalizer, NaNLabelE
 from pytorch_forecasting.metrics import MultiLoss, MAE
 
 
-def get_text_embeddings(text_list, model_name="distilbert-base-uncased", batch_size=32):
+def get_text_embeddings(text_list, model_name="bert-base-uncased", batch_size=32):
     """Utility to extract mean-pooled embeddings from a transformer model."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -22,9 +22,8 @@ def get_text_embeddings(text_list, model_name="distilbert-base-uncased", batch_s
         for i in range(0, len(text_list), batch_size):
             batch_texts = text_list[i:i+batch_size]
             encoded = tokenizer(batch_texts, padding=True, truncation=True,
-                                max_length=128, return_tensors='pt').to(device)
+                                max_length=512, return_tensors='pt').to(device)
             outputs = model(**encoded)
-            # Mean pooling over the sequence length
             embeddings = outputs.last_hidden_state.mean(dim=1).cpu().numpy()
             all_embeddings.append(embeddings)
 
@@ -41,25 +40,19 @@ def main():
     test_user_ids = test_users_df['user_id'].unique().tolist()
     df['time_idx'] = df.groupby('user_id').cumcount()
 
-    # --- NEW: Text Embedding Step ---
     print("Generating text embeddings...")
-    # Fill missing text with empty string just in case
     df['text'] = df['text'].fillna("")
 
-    # 1. Get raw embeddings (e.g., 768 dimensions)
     raw_embeddings = get_text_embeddings(df['text'].tolist())
 
-    # 2. Reduce dimensionality so the TFT doesn't explode in parameter size
-    n_components = 16
+    n_components = 32
     print(f"Reducing embeddings to {n_components} dimensions using PCA...")
     pca = PCA(n_components=n_components)
     reduced_embeddings = pca.fit_transform(raw_embeddings)
 
-    # 3. Add embedding dimensions as new columns to the dataframe
     emb_cols = [f"text_emb_{i}" for i in range(n_components)]
     emb_df = pd.DataFrame(reduced_embeddings, columns=emb_cols)
     df = pd.concat([df.reset_index(drop=True), emb_df], axis=1)
-    # --------------------------------
 
     train_df = df[~df['user_id'].isin(test_user_ids)].copy()
     inference_df = df[df['user_id'].isin(test_user_ids)].copy()
@@ -69,7 +62,6 @@ def main():
     max_prediction_length = 1
     max_encoder_length = 20
 
-    # 4. Add the new embedding columns to the TFT configuration
     training_dataset = TimeSeriesDataSet(
         train_df,
         time_idx="time_idx",
@@ -80,7 +72,6 @@ def main():
         min_prediction_length=max_prediction_length,
         max_prediction_length=max_prediction_length,
         time_varying_known_reals=["time_idx"],
-        # Add the text embeddings here so the TFT uses them!
         time_varying_unknown_reals=["valence", "arousal"] + emb_cols,
         target_normalizer=MultiNormalizer([
             GroupNormalizer(groups=["user_id"], transformation=None),
@@ -100,10 +91,10 @@ def main():
     tft = TemporalFusionTransformer.from_dataset(
         training_dataset,
         learning_rate=0.03,
-        hidden_size=32,  # Increased slightly to handle the new features
+        hidden_size=32,
         attention_head_size=2,
         dropout=0.1,
-        hidden_continuous_size=16,  # Increased to match our PCA components
+        hidden_continuous_size=16,
         output_size=[1, 1],
         loss=MultiLoss([MAE(), MAE()]),
     )
@@ -112,7 +103,7 @@ def main():
         max_epochs=1,
         accelerator='auto',
         gradient_clip_val=0.1,
-        enable_model_summary=True,  # Turned this on so you can verify the inputs!
+        enable_model_summary=True,
         enable_checkpointing=False,
         logger=False
     )
